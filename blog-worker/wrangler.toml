@@ -1,0 +1,17 @@
+name = "fantula-blog-api"
+main = "index.js"
+compatibility_date = "2024-01-01"
+account_id = "77e9b725d939b8b7b44df208a40f3fae"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "fantula-blog"
+database_id = "f6e8d73c-cfaa-4cd8-aa7e-a44d0945d3dd"
+
+[[r2_buckets]]
+binding = "IMAGES"
+bucket_name = "fantula-blog-images"
+
+[vars]
+ALLOWED_ORIGIN = "https://blog.fantula.com"
+API_SECRET = "your_api_secret_here"   # 在 Cloudflare Dashboard → Workers → Settings → Variables 中设置

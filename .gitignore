@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Secrets (never commit real values)
+.env
+.env.local
+secrets.toml
+
+# Node
+node_modules/
+.wrangler/
+
+# macOS
+.DS_Store

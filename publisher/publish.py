@@ -15,7 +15,7 @@ Fantula 双平台博客自动发布脚本
   python3 publish.py --test                    # 测试 API 连接是否正常
 """
 
-import sys, json, os, argparse, mimetypes
+import sys, json, os, argparse, mimetypes, subprocess
 from pathlib import Path
 
 # ── 加载配置 ─────────────────────────────────────────────────
@@ -27,6 +27,8 @@ try:
 except ImportError:
     print("❌ 找不到 config.py，请先配置 API 密钥")
     sys.exit(1)
+
+BLOGGER_CLI = Path(__file__).parent.parent.parent / "blogger-mcp-server" / "blogger_cli.py"
 
 import urllib.request, urllib.parse, urllib.error
 import json as _json
@@ -312,6 +314,76 @@ def publish_wp(article: dict, draft=False) -> dict:
 
 
 # ════════════════════════════════════════════════════════════
+#  Blogger 发布
+# ════════════════════════════════════════════════════════════
+
+def publish_blogger(article: dict, draft=False) -> dict:
+    """
+    发布到 Blogger (fantula.blogspot.com)
+
+    流程:
+      1. 封面图 + 正文图片 → 上传到 CF R2（获得公开 URL）
+      2. Markdown → HTML（图片已替换为 CDN URL）
+      3. 调用 blogger_cli.py 发布
+
+    注意：使用 CF CDN URL，而非 base64 内嵌，否则 Blogger API 会把图片剥除。
+    """
+    print("\n📡 发布到 Blogger...")
+
+    # 1. 上传封面图
+    cover_url = article.get("cover_image", "")
+    if cover_url and not cover_url.startswith("http"):
+        cover_url = upload_image_cf(cover_url)
+
+    # 2. 替换正文本地图片 → CF CDN URL
+    content = article.get("content", "")
+    import re
+    for local_path in re.findall(r'!\[.*?\]\(((?!http)[^)]+)\)', content):
+        remote_url = upload_image_cf(local_path)
+        content = content.replace(f"]({local_path})", f"]({remote_url})")
+
+    # 3. Markdown → HTML
+    html = md_to_html(content)
+    if cover_url:
+        html = f'<div style="text-align:center;margin-bottom:16px"><img src="{cover_url}" style="max-width:100%"></div>\n' + html
+
+    # 4. 写临时 HTML 文件
+    tmp_html = "/tmp/blogger_post_fantula.html"
+    Path(tmp_html).write_text(html, encoding="utf-8")
+
+    # 5. 组装标签
+    tags = article.get("tags", [])
+    labels = ",".join(tags) + ",凡图拉" if tags else "凡图拉"
+
+    # 6. 调用 blogger_cli.py
+    cmd = [
+        "python3", str(BLOGGER_CLI),
+        "draft" if draft else "publish",
+        "--title",  article["title"],
+        "--file",   tmp_html,
+        "--labels", labels,
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return {"platform": "blogger", "success": False, "error": "超时"}
+
+    if r.returncode != 0:
+        err = r.stderr.strip() or r.stdout.strip()
+        print(f"  ❌ 失败: {err[:200]}")
+        return {"platform": "blogger", "success": False, "error": err}
+
+    try:
+        data = json.loads(r.stdout)
+        url  = data.get("url", "")
+        print(f"  ✅ 成功！ID: {data.get('id')}  URL: {url}")
+        return {"platform": "blogger", "success": True, "id": data.get("id"), "url": url}
+    except Exception:
+        print(f"  ❌ 响应解析失败: {r.stdout[:200]}")
+        return {"platform": "blogger", "success": False, "error": r.stdout}
+
+
+# ════════════════════════════════════════════════════════════
 #  主入口
 # ════════════════════════════════════════════════════════════
 
@@ -337,12 +409,13 @@ def test_connections():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fantula 双平台博客发布工具")
-    parser.add_argument("article",  nargs="?", help="文章 JSON 文件路径")
-    parser.add_argument("--cf",     action="store_true", help="只发布到 Cloudflare")
-    parser.add_argument("--wp",     action="store_true", help="只发布到 WordPress.com")
-    parser.add_argument("--draft",  action="store_true", help="存为草稿")
-    parser.add_argument("--test",   action="store_true", help="测试 API 连接")
+    parser = argparse.ArgumentParser(description="Fantula 博客发布工具（CF + WP + Blogger）")
+    parser.add_argument("article",    nargs="?", help="文章 JSON 文件路径")
+    parser.add_argument("--cf",       action="store_true", help="只发布到 Cloudflare")
+    parser.add_argument("--wp",       action="store_true", help="只发布到 WordPress.com")
+    parser.add_argument("--blogger",  action="store_true", help="只发布到 Blogger")
+    parser.add_argument("--draft",    action="store_true", help="存为草稿")
+    parser.add_argument("--test",     action="store_true", help="测试 API 连接")
     args = parser.parse_args()
 
     if args.test:
@@ -388,11 +461,13 @@ def main():
     print("─" * 50)
 
     results = []
-    both = not args.cf and not args.wp
-    if args.cf or both:
+    all_platforms = not args.cf and not args.wp and not args.blogger
+    if args.cf or all_platforms:
         results.append(publish_cf(article, draft=args.draft))
-    if args.wp or both:
+    if args.wp or all_platforms:
         results.append(publish_wp(article, draft=args.draft))
+    if args.blogger or all_platforms:
+        results.append(publish_blogger(article, draft=args.draft))
 
     print("\n" + "═" * 50)
     print("📊 发布结果汇总")

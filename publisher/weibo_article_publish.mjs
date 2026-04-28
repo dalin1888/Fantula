@@ -37,7 +37,7 @@ const _daemonClient = path.join(_globalRoot, '@jackwener/opencli/dist/src/browse
 const { sendCommand } = await import(_daemonClient);
 
 // ─── 参数解析 ──────────────────────────────────────────────────────────────
-const [,, title, contentFile, coverArg] = process.argv;
+let [,, title, contentFile, coverArg] = process.argv;
 if (!title || !contentFile) {
   console.error('用法: node weibo_article_publish.mjs "文章标题" article.md [cover.png]');
   process.exit(1);
@@ -222,17 +222,30 @@ function mdToHtml(md) {
 
 // ─── 主流程 ────────────────────────────────────────────────────────────────
 console.log('🔑 读取微博 cookies...');
-let cookieStr, xsrfToken, uid;
+let cookieStr, xsrfToken, uid, rawCookies;
 try {
-  const cookies = await sendCommand('cookies', { url: 'https://weibo.com' });
-  const sub = cookies.find(c => c.name === 'SUB');
+  // 同时获取三个域的 cookies，合并去重（card.weibo.com 有 PC_TOKEN / XSRF-TOKEN）
+  const [weiboCookies, cardCookies, passportCookies] = await Promise.all([
+    sendCommand('cookies', { url: 'https://weibo.com' }),
+    sendCommand('cookies', { url: 'https://card.weibo.com' }).catch(() => []),
+    sendCommand('cookies', { url: 'https://passport.weibo.com' }).catch(() => []),
+  ]);
+  // 合并并去重（weibo.com 优先，再 card，再 passport）
+  const seen = new Set(weiboCookies.map(c => c.name));
+  const seen2 = new Set([...seen, ...cardCookies.map(c => c.name)]);
+  rawCookies = [
+    ...weiboCookies,
+    ...cardCookies.filter(c => !seen.has(c.name)),
+    ...passportCookies.filter(c => !seen2.has(c.name)),
+  ];
+
+  const sub = rawCookies.find(c => c.name === 'SUB');
   if (!sub) { console.error('❌ 未找到 SUB cookie，请先在白色浪漫 Chrome 里登录微博'); process.exit(1); }
 
-  cookieStr  = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-  xsrfToken  = cookies.find(c => c.name === 'XSRF-TOKEN')?.value || '';
-  const uidCookie = cookies.find(c => c.name === 'uid' || c.name === 'WEIBOCN_FROM');
+  cookieStr  = rawCookies.map(c => `${c.name}=${c.value}`).join('; ');
+  xsrfToken  = rawCookies.find(c => c.name === 'XSRF-TOKEN')?.value || '';
   uid = '7727624629';  // 凡图拉固定 UID
-  console.log('✅ cookies 读取成功');
+  console.log(`✅ cookies 读取成功（${rawCookies.length} 个）`);
 } catch (e) {
   console.error('❌ Browser Bridge 连接失败:', e.message);
   process.exit(1);
@@ -259,7 +272,13 @@ if (ext === '.md') {
 }
 const htmlContent = ext === '.md' ? mdToHtml(processedMd) : rawContent;
 
-console.log(`   标题: ${title}`);
+// 微博头条文章标题最多 32 字
+if ([...title].length > 32) {
+  const trimmed = [...title].slice(0, 32).join('');
+  console.warn(`⚠️  标题超过32字，已截断: ${trimmed}`);
+  title = trimmed;
+}
+console.log(`   标题: ${title}`);;
 console.log(`   HTML 长度: ${htmlContent.length} 字符`);
 
 // ─── Playwright 发布 ───────────────────────────────────────────────────────
@@ -267,166 +286,279 @@ console.log('\n🌐 启动 Playwright 打开微博文章编辑器...');
 
 // 将 HTML + 元数据写到临时文件，供 Playwright 读取
 const tmpPayload = `/tmp/weibo_article_payload_${Date.now()}.json`;
-fs.writeFileSync(tmpPayload, JSON.stringify({ title, html: htmlContent, coverUrl, cookieStr }));
+// 构建 Playwright 格式的完整 cookie 对象（保留 domain/secure/httpOnly/sameSite/expires）
+const pwCookies = rawCookies.map(c => {
+  const obj = {
+    name:     c.name,
+    value:    c.value,
+    domain:   c.domain || '.weibo.com',
+    path:     c.path || '/',
+    httpOnly: !!c.httpOnly,
+    secure:   !!c.secure,
+    sameSite: ['Strict','Lax','None'].includes(c.sameSite) ? c.sameSite : 'Lax',
+  };
+  const exp = c.expirationDate ?? c.expires;
+  if (exp) obj.expires = Number(exp);
+  return obj;
+});
+fs.writeFileSync(tmpPayload, JSON.stringify({ title, html: htmlContent, coverUrl, cookieStr, pwCookies }));
 
 // Playwright 脚本（注入为子进程，在 SAU Python 环境里运行）
 const PW_SCRIPT = `
-import asyncio, json, sys, time
+import asyncio, json, time, pyperclip
 from playwright.async_api import async_playwright
 
 payload = json.loads(open('${tmpPayload}').read())
 title     = payload['title']
 html      = payload['html']
 cover_url = payload['coverUrl']
-cookie_str= payload['cookieStr']
+pw_cookies= payload['pwCookies']
+
+# ── 把 HTML 写入剪贴板供粘贴 ──────────────────────────────────────────────────
+def copy_to_clipboard(text):
+    try:
+        pyperclip.copy(text)
+        return True
+    except Exception as e:
+        print(f'   ⚠️  剪贴板写入失败: {e}')
+        return False
 
 async def main():
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, args=['--no-sandbox'])
+        browser = await p.chromium.launch(
+            headless=False,
+            args=['--no-sandbox', '--disable-blink-features=AutomationControlled'],
+        )
         ctx = await browser.new_context(
             viewport={'width': 1440, 'height': 900},
             user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         )
+        await ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
 
-        # 注入 Weibo cookies
-        for pair in cookie_str.split('; '):
-            if '=' not in pair: continue
-            name, _, val = pair.partition('=')
-            try:
-                await ctx.add_cookies([{
-                    'name': name.strip(), 'value': val.strip(),
-                    'domain': '.weibo.com', 'path': '/',
-                }])
-            except Exception:
-                pass
+        # 注入 cookies
+        try:
+            await ctx.add_cookies(pw_cookies)
+            print(f'✅ 注入 {len(pw_cookies)} 个 cookies')
+        except Exception as e:
+            print(f'⚠️  批量注入失败: {e}，逐个注入...')
+            ok = 0
+            for c in pw_cookies:
+                try: await ctx.add_cookies([c]); ok += 1
+                except: pass
+            print(f'   逐个注入：{ok}/{len(pw_cookies)}')
 
         page = await ctx.new_page()
 
-        print('🌐 打开微博文章编辑器...')
-        await page.goto('https://weibo.com/ttarticle/pc/writenew', wait_until='domcontentloaded', timeout=30000)
+        # ── Step 1: 先去主页建立 session ──────────────────────────────────────
+        print('🌐 验证微博登录状态...')
+        await page.goto('https://weibo.com', wait_until='networkidle', timeout=30000)
+        await page.wait_for_timeout(2000)
+        if 'login' in page.url or 'passport' in page.url:
+            print('❌ 未登录，请先在白色浪漫 Chrome 里登录微博')
+            await browser.close(); return
+        print(f'   ✅ 已登录，URL: {page.url}')
+
+        # ── Step 2: 打开文章编辑器（card.weibo.com）─────────────────────────
+        print('🌐 打开微博头条文章编辑器...')
+        await page.goto('https://card.weibo.com/article/v5/editor#/draft',
+                        wait_until='networkidle', timeout=60000)
         await page.wait_for_timeout(3000)
+        print(f'   URL: {page.url} | 标题: {await page.title()}')
 
-        # 截图确认页面
-        ss1 = f'/tmp/weibo_article_1_{int(time.time())}.png'
-        await page.screenshot(path=ss1)
-        print(f'   截图: {ss1}')
+        # 等待标题输入框出现
+        try:
+            await page.wait_for_selector('textarea[placeholder="请输入标题"]', timeout=20000)
+            print('   ✅ 编辑器已就绪')
+        except:
+            ss = f'/tmp/weibo_article_editor_err_{int(time.time())}.png'
+            await page.screenshot(path=ss, full_page=True)
+            print(f'   ❌ 编辑器未加载，截图: {ss}'); await browser.close(); return
 
-        # 填入标题
-        title_sels = [
-            'input[placeholder*="标题"]',
-            'input.title-input',
-            'input[data-type="title"]',
-            'div.title input',
-            'input[name="title"]',
-        ]
-        title_filled = False
-        for sel in title_sels:
-            try:
-                if await page.locator(sel).count() > 0:
-                    await page.locator(sel).first.fill(title)
-                    title_filled = True
-                    print(f'✅ 标题已填入: {sel}')
-                    break
-            except Exception:
-                continue
-
-        if not title_filled:
-            print('⚠️  未找到标题输入框，尝试用 TAB 定位...')
-            await page.keyboard.press('Tab')
-            await page.keyboard.type(title)
-
-        await page.wait_for_timeout(500)
-
-        # 注入 HTML 内容到富文本编辑器
-        print('📄 注入文章 HTML 内容...')
-        injected = await page.evaluate("""(html) => {
-            // 尝试常见的微博文章编辑器选择器
-            const selectors = [
-                'div.ProseMirror',
-                'div[contenteditable="true"]',
-                'div.ql-editor',
-                'div.editor-content',
-                'div[class*="article-editor"]',
-                'div[class*="content-editor"]',
-                'div[class*="editor"][contenteditable]',
-            ];
-            for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (el) {
-                    el.focus();
-                    el.innerHTML = html;
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                    return {ok: true, sel};
-                }
-            }
-            // 最后尝试：找所有 contenteditable
-            const all = document.querySelectorAll('[contenteditable="true"]');
-            if (all.length > 0) {
-                const el = all[all.length - 1]; // 通常最后一个是内容区
-                el.focus();
-                el.innerHTML = html;
-                el.dispatchEvent(new Event('input', {bubbles: true}));
-                return {ok: true, sel: 'last-contenteditable'};
-            }
-            return {ok: false};
-        }""", html)
-
-        print(f'   注入结果: {injected}')
+        # 等待 loading spinner 消失（n-spin-body editor-spin 遮住了输入框）
+        try:
+            await page.wait_for_selector('.editor-spin', state='hidden', timeout=15000)
+            print('   ✅ Spinner 已消失')
+        except:
+            print('   ⚠️  Spinner 未消失，继续尝试...')
         await page.wait_for_timeout(1500)
 
-        ss2 = f'/tmp/weibo_article_2_{int(time.time())}.png'
-        await page.screenshot(path=ss2)
-        print(f'   内容截图: {ss2}')
+        ss1 = f'/tmp/weibo_article_1_{int(time.time())}.png'
+        await page.screenshot(path=ss1, full_page=True)
+        print(f'   编辑器截图: {ss1}')
 
-        # 找发布按钮
+        # ── Step 3: 先点击正文区激活编辑器（消除 spinner）──────────────────────
+        print('🖱️  激活编辑器（点击正文区）...')
+        editor = page.locator('div.ProseMirror').first
+        try:
+            await editor.click(force=True, timeout=5000)
+        except: pass
+        await page.wait_for_timeout(1500)
+        # 再等 spinner 消失
+        try:
+            await page.wait_for_selector('.editor-spin', state='hidden', timeout=8000)
+            print('   ✅ Spinner 已消失')
+        except:
+            print('   ⚠️  Spinner 可能仍在，继续...')
+        await page.wait_for_timeout(1000)
+
+        # ── Step 4: 用 Vue 兼容方式填入标题 ──────────────────────────────────
+        print(f'✏️  填入标题: {title[:30]}...')
+        # 使用 nativeInputValueSetter 触发 Vue/Naive-UI 的响应式更新
+        title_set = await page.evaluate("""(t) => {
+            const ta = document.querySelector('textarea[placeholder="请输入标题"]');
+            if (!ta) return false;
+            const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+            if (setter) setter.call(ta, t);
+            else ta.value = t;
+            ta.dispatchEvent(new Event('input', {bubbles: true}));
+            ta.dispatchEvent(new Event('change', {bubbles: true}));
+            return ta.value === t;
+        }""", title)
+        print(f'   标题设置: {"✅" if title_set else "⚠️ 失败"}')
+        await page.wait_for_timeout(500)
+
+        # ── Step 5: 注入正文内容到 ProseMirror ───────────────────────────────
+        print('📄 注入正文内容...')
+        await editor.click(force=True)
+        await page.wait_for_timeout(300)
+
+        # 方法 A：直接 innerHTML 注入（ProseMirror v5 支持）
+        injected = await page.evaluate("""(html) => {
+            const el = document.querySelector('div.ProseMirror');
+            if (!el) return {ok: false, reason: 'editor not found'};
+            el.focus();
+            // 清空并注入
+            document.execCommand('selectAll', false, null);
+            document.execCommand('delete', false, null);
+            const ok = document.execCommand('insertHTML', false, html);
+            if (ok && el.innerText.trim().length > 0) return {ok: true, method: 'execCommand'};
+            // 退路：直接设 innerHTML
+            el.innerHTML = html;
+            el.dispatchEvent(new InputEvent('input', {bubbles: true}));
+            return {ok: el.innerText.trim().length > 0, method: 'innerHTML'};
+        }""", html)
+        print(f'   注入结果: {injected}')
+
+        # 方法 B：如果 A 失败，用剪贴板粘贴
+        if not injected.get('ok'):
+            print('   方法 B：剪贴板粘贴...')
+            if copy_to_clipboard(html):
+                await editor.click()
+                await page.keyboard.press('Control+a')
+                await page.keyboard.press('Control+v')
+                await page.wait_for_timeout(1000)
+                print('   ✅ 剪贴板粘贴完成')
+            else:
+                print('   ⚠️  剪贴板不可用，跳过正文注入')
+
+        await page.wait_for_timeout(1500)
+        ss2 = f'/tmp/weibo_article_2_{int(time.time())}.png'
+        await page.screenshot(path=ss2, full_page=True)
+        print(f'   正文截图: {ss2}')
+
+        # ── Step 5: 点击「下一步」→ 发布流程 ──────────────────────────────────
+        print('🚀 点击「下一步」...')
+        next_btn = page.locator('button:has-text("下一步")').first
+        if await next_btn.count() > 0:
+            await next_btn.click()
+            await page.wait_for_timeout(4000)
+            print(f'   URL after 下一步: {page.url}')
+        else:
+            print('   ⚠️  未找到「下一步」按钮')
+
+        ss3 = f'/tmp/weibo_article_3_{int(time.time())}.png'
+        await page.screenshot(path=ss3, full_page=True)
+        print(f'   下一步后截图: {ss3}')
+
+        # ── Step 6: 检测 CAPTCHA，等待人工处理 ────────────────────────────────
+        # 「下一步」打开的是发布设置弹层，需要再操作一次
+        # 如果触发了 CAPTCHA，等待人工滑动验证
+        await page.wait_for_timeout(2000)
+        if 'captcha' in page.url or 'security.weibo' in page.url:
+            print('\\n🔒 检测到滑动验证码（GeeTest）！')
+            print('   ⬆️  请在弹出的浏览器窗口中手动拖动滑块完成验证。')
+            print('   等待最多 120 秒...')
+            for _ in range(24):  # 每5秒检查一次，最多120秒
+                await page.wait_for_timeout(5000)
+                if 'captcha' not in page.url and 'security.weibo' not in page.url:
+                    print(f'   ✅ CAPTCHA 已通过！当前 URL: {page.url}')
+                    break
+            else:
+                print('   ⚠️  CAPTCHA 超时，未能完成验证。')
+                ss_cap = f'/tmp/weibo_article_captcha_{int(time.time())}.png'
+                await page.screenshot(path=ss_cap)
+                print(f'   截图: {ss_cap}')
+                await browser.close(); return
+            await page.wait_for_timeout(2000)
+        ss3b = f'/tmp/weibo_article_settings_{int(time.time())}.png'
+        await page.screenshot(path=ss3b, full_page=True)
+        print(f'   发布设置截图: {ss3b}')
+
+        # 关闭标题超长警告（如果有）
+        try:
+            close_btns = page.locator('[class*="close"],[class*="dismiss"],.n-alert__close')
+            if await close_btns.count() > 0:
+                await close_btns.first.click(force=True)
+                await page.wait_for_timeout(300)
+        except: pass
+
+        # 按优先级尝试发布/确认按钮
         publish_sels = [
+            'button:has-text("下一步")',   # 发布设置页里的"下一步"
+            'button:has-text("确定")',      # 确认按钮
             'button:has-text("发布")',
+            'button:has-text("立即发布")',
             'button:has-text("发布文章")',
-            'button.publish-btn',
             'button[class*="publish"]',
-            'div:has-text("发布") >> button',
-            'span:has-text("发布") >> ..',
         ]
         published = False
         for sel in publish_sels:
             try:
-                btn = page.locator(sel).first
-                if await btn.count() > 0:
-                    print(f'🚀 点击发布按钮: {sel}')
-                    await btn.click()
-                    await page.wait_for_timeout(3000)
-                    published = True
-                    break
-            except Exception:
-                continue
+                btns = page.locator(sel)
+                cnt = await btns.count()
+                if cnt > 0:
+                    # 取最后一个（避免点到「保存草稿」旁边的按钮）
+                    btn = btns.last
+                    if await btn.is_enabled():
+                        print(f'🚀 点击: {sel} (共{cnt}个，点最后一个)')
+                        await btn.click()
+                        await page.wait_for_timeout(4000)
+                        published = True
+                        # 如果还有 "下一步" 再点一次（多步发布流程）
+                        try:
+                            next2 = page.locator('button:has-text("下一步")').last
+                            if await next2.count() > 0 and await next2.is_enabled():
+                                print('   再点一次「下一步」...')
+                                await next2.click()
+                                await page.wait_for_timeout(4000)
+                        except: pass
+                        break
+            except: continue
 
         if not published:
-            ss3 = f'/tmp/weibo_article_publish_btn_{int(time.time())}.png'
-            await page.screenshot(path=ss3)
-            print(f'⚠️  未找到发布按钮，截图: {ss3}')
-            print('   请手动点击发布按钮，等待60秒...')
-            await page.wait_for_timeout(60000)
+            ss4 = f'/tmp/weibo_article_publish_btn_{int(time.time())}.png'
+            await page.screenshot(path=ss4, full_page=True)
+            print(f'⚠️  未找到发布按钮，请手动点击，截图: {ss4}')
+            print('   等待 90 秒...')
+            await page.wait_for_timeout(90000)
 
-        # 等待发布完成，获取文章 URL
+        # ── Step 7: 获取文章 URL ───────────────────────────────────────────────
         await page.wait_for_timeout(3000)
-        ss4 = f'/tmp/weibo_article_done_{int(time.time())}.png'
-        await page.screenshot(path=ss4)
-        print(f'   发布后截图: {ss4}')
+        final_url = page.url
+        ss5 = f'/tmp/weibo_article_done_{int(time.time())}.png'
+        await page.screenshot(path=ss5, full_page=True)
+        print(f'\\n✅ 完成！最终 URL: {final_url}')
+        print(f'   截图: {ss5}')
 
-        current_url = page.url
-        print(f'\\n✅ 完成！当前 URL: {current_url}')
-
-        if 'ttarticle' in current_url and 'show' in current_url:
-            print(f'🔗 文章地址: {current_url}')
-        else:
-            # 尝试从页面提取文章链接
-            article_links = await page.evaluate("""() => {
-                const links = [...document.querySelectorAll('a[href*="ttarticle"]')];
-                return links.map(a => a.href).filter(h => h.includes('show'));
-            }""")
-            if article_links:
-                print(f'🔗 文章地址: {article_links[0]}')
+        # 提取文章链接
+        article_links = await page.evaluate("""() => {
+            const links = [...document.querySelectorAll('a')];
+            return links.map(a=>a.href).filter(h=>h.includes('card.weibo.com/article')||h.includes('ttarticle')).slice(0,3);
+        }""")
+        if article_links:
+            print(f'🔗 文章地址: {article_links[0]}')
+        elif 'article' in final_url or 'show' in final_url:
+            print(f'🔗 文章地址: {final_url}')
 
         await browser.close()
         import os; os.unlink('${tmpPayload}')

@@ -1,0 +1,5 @@
+name = "fantula-blog"
+account_id = "77e9b725d939b8b7b44df208a40f3fae"
+
+[env.production]
+name = "fantula-blog"

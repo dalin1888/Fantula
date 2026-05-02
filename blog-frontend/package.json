@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
-    "preview": "astro preview"
+    "preview": "astro preview",
+    "deploy": "astro build && CLOUDFLARE_ACCOUNT_ID=77e9b725d939b8b7b44df208a40f3fae wrangler pages deploy dist --project-name=fantula-blog --commit-dirty=true"
   },
   "dependencies": {
     "astro": "^4.15.0",

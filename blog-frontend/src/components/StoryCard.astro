@@ -1,0 +1,24 @@
+---
+const { post, lang } = Astro.props;
+import { PRODUCTS, dateFmt } from '../lib/products.js';
+import { t } from '../lib/api.js';
+
+const product = PRODUCTS.find(p => p.slug === post.product);
+const title   = t(post, 'title', lang);
+const excerpt = t(post, 'excerpt', lang);
+const date    = dateFmt(post.created_at || post.date || '2026-04-01', lang);
+const readMin = post.reading_time || 5;
+const minRead = lang === 'ja' ? '分で読了' : lang === 'en' ? 'min read' : '分钟阅读';
+---
+<a class="story" href={`/${lang}/article/${post.slug}/`}>
+  <div class="story__category">{product?.name[lang] ?? post.product}</div>
+  <h3 class="story__title">{title}</h3>
+  <p class="story__excerpt">{excerpt}</p>
+  <div class="story__meta">
+    <strong>{post.author_name}</strong>
+    <span class="dot"></span>
+    <span>{date}</span>
+    <span class="dot"></span>
+    <span>{readMin} {minRead}</span>
+  </div>
+</a>

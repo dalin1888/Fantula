@@ -1,0 +1,102 @@
+---
+import Layout from '../../../components/Layout.astro';
+import Masthead from '../../../components/Masthead.astro';
+import Colophon from '../../../components/Colophon.astro';
+import StoryCard from '../../../components/StoryCard.astro';
+import { LANGS, PRODUCTS, I18N, dateFmt } from '../../../lib/products.js';
+import { getPosts, getPost, t } from '../../../lib/api.js';
+import { marked } from 'marked';
+
+export async function getStaticPaths() {
+  const paths = [];
+  let allPosts = [];
+  try { allPosts = await getPosts({ limit: 100 }); } catch (e) { allPosts = []; }
+
+  for (const lang of LANGS) {
+    for (const post of allPosts) {
+      // fetch full post (with content) — list endpoint may not include content
+      let full = post;
+      try {
+        const fetched = await getPost(post.slug);
+        if (fetched) full = fetched;
+      } catch (e) {}
+      paths.push({ params: { lang, slug: post.slug }, props: { lang, post: full, allPosts } });
+    }
+  }
+  return paths;
+}
+
+const { lang, post, allPosts } = Astro.props;
+const ui = I18N[lang] || I18N.zh;
+const product = PRODUCTS.find(p => p.slug === post.product);
+
+const title   = t(post, 'title', lang);
+const excerpt = t(post, 'excerpt', lang);
+const rawBody = t(post, 'content', lang) || excerpt;
+const body    = marked.parse(rawBody);
+
+const related = allPosts
+  .filter(p => p.product === post.product && p.slug !== post.slug)
+  .slice(0, 3);
+
+const schema = JSON.stringify({
+  "@context": "https://schema.org",
+  "@type": "Article",
+  "headline": title,
+  "description": excerpt,
+  "author": { "@type": "Person", "name": post.author_name },
+  "datePublished": post.created_at || post.date,
+  "publisher": { "@type": "Organization", "name": "Fantula 凡图拉", "url": "https://www.fantula.com" }
+});
+---
+<Layout title={`${title} | Fantula Journal`} description={excerpt} lang={lang} slug={post.slug} schema={schema}>
+
+  <Masthead lang={lang} product={post.product} />
+
+  <div class="container">
+    <nav class="breadcrumb">
+      <a href={`/${lang}/`}>{ui.crumbHome}</a>
+      <span class="sep">/</span>
+      <a href={`/${lang}/${post.product}/`}>{product?.name[lang]}</a>
+      <span class="sep">/</span>
+      <span class="current">{title.slice(0, 28)}…</span>
+    </nav>
+  </div>
+
+  <header class="article-head">
+    <div class="container">
+      <div class="article-head__kicker">{product?.name[lang]} · {post.kind}</div>
+      <h1 class="article-head__title">{title}</h1>
+      <p class="article-head__lede">{excerpt}</p>
+      <div class="article-head__rule"></div>
+      <div class="article-head__byline">
+        <span><strong>{post.author_name}</strong></span>
+        <span>·</span>
+        <span>{post.author_role}</span>
+        <span>·</span>
+        <time datetime={post.created_at}>{dateFmt(post.created_at || '2026-04-01', lang)}</time>
+        <span>·</span>
+        <span>{post.reading_time} {lang === 'ja' ? '分で読了' : lang === 'en' ? 'min read' : '分钟阅读'}</span>
+      </div>
+    </div>
+  </header>
+
+  <article class="article-body" set:html={body}></article>
+
+  {related.length > 0 && (
+    <section class="related-section">
+      <div class="container">
+        <div class="section-head" style="padding-top:0;border-top:0">
+          <div class="section-head__kicker">Related Reading</div>
+          <h3 class="section-head__title">{ui.relatedTitle}</h3>
+          <div class="section-head__rule"></div>
+        </div>
+        <div class="article-list">
+          {related.map(p => <StoryCard post={p} lang={lang} />)}
+        </div>
+      </div>
+    </section>
+  )}
+
+  <Colophon lang={lang} />
+</Layout>

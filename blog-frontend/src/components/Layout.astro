@@ -1,0 +1,29 @@
+---
+import '../styles/global.css';
+const { title, description, lang = 'zh', slug = '', product = '', schema = '' } = Astro.props;
+const canonical = `https://blog.fantula.com/${lang}/${slug ? `article/${slug}/` : (product ? `${product}/` : '')}`;
+---
+<!DOCTYPE html>
+<html lang={lang === 'zh' ? 'zh-CN' : lang === 'ja' ? 'ja-JP' : 'en-US'}>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <title>{title}</title>
+  <meta name="description" content={description}>
+  <link rel="canonical" href={canonical}>
+  <link rel="alternate" hreflang="zh-CN" href={`https://blog.fantula.com/zh/${slug ? `article/${slug}/` : (product ? `${product}/` : '')}`}>
+  <link rel="alternate" hreflang="en"    href={`https://blog.fantula.com/en/${slug ? `article/${slug}/` : (product ? `${product}/` : '')}`}>
+  <link rel="alternate" hreflang="ja"    href={`https://blog.fantula.com/ja/${slug ? `article/${slug}/` : (product ? `${product}/` : '')}`}>
+  <meta property="og:type" content="website">
+  <meta property="og:title" content={title}>
+  <meta property="og:description" content={description}>
+  {schema && <script type="application/ld+json" set:html={schema}></script>}
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400;1,8..60,600&family=Noto+Serif+SC:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <slot />
+</body>
+</html>

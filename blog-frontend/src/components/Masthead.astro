@@ -1,0 +1,31 @@
+---
+const { lang, product = '' } = Astro.props;
+import { PRODUCTS, I18N } from '../lib/products.js';
+const t = I18N[lang] || I18N.zh;
+const langs = ['zh', 'en', 'ja'];
+---
+<header class="masthead">
+  <div class="masthead__top container">
+    <span>2026 年 · 凡图拉编辑部</span>
+    <div class="masthead__top-right">
+      <div class="lang-pill">
+        {langs.map(l => (
+          <a href={`/${l}/`} class={lang === l ? 'is-active' : ''}>{l.toUpperCase()}</a>
+        ))}
+      </div>
+      <a href="https://www.fantula.com" target="_blank" rel="noopener">{t.back}</a>
+    </div>
+  </div>
+  <div class="masthead__title-row container">
+    <a href={`/${lang}/`} style="text-decoration:none">
+      <h1 class="masthead__title">Fantula <em>Journal</em></h1>
+    </a>
+    <div class="masthead__sub">A QUARTERLY ON STREAMING · MEMBERSHIPS · ACCESS</div>
+  </div>
+  <nav class="masthead__nav container">
+    <a href={`/${lang}/`} class={!product ? 'is-active' : ''}>{t.navHome}</a>
+    {PRODUCTS.map(p => (
+      <a href={`/${lang}/${p.slug}/`} class={product === p.slug ? 'is-active' : ''}>{p.name[lang]}</a>
+    ))}
+  </nav>
+</header>

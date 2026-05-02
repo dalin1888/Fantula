@@ -16,22 +16,27 @@ function isAuthed(request, env) {
   return request.headers.get('X-API-Secret') === env.API_SECRET;
 }
 
+// Columns returned in list (no content body to keep payload small)
+const LIST_COLS = `id, slug, product, kind, featured, reading_time,
+  title_zh, title_en, title_ja,
+  excerpt_zh, excerpt_en, excerpt_ja,
+  author_name, author_role, author_avatar,
+  tags_zh, keywords, cover_hue, cover_label,
+  views, created_at, updated_at`;
+
 export default {
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '*';
-    const url = new URL(request.url);
-    const path = url.pathname;
+    const url    = new URL(request.url);
+    const path   = url.pathname;
     const method = request.method;
 
-    // CORS preflight
     if (method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: CORS_HEADERS(origin) });
     }
 
     try {
-      // ─── 公开接口 ───────────────────────────────────────────
-
-      // GET /images/:key — 从 R2 提供图片
+      // ── GET /images/:key ──────────────────────────────────────
       if (method === 'GET' && path.startsWith('/images/')) {
         const key = decodeURIComponent(path.replace('/images/', ''));
         const object = await env.IMAGES.get(key);
@@ -43,24 +48,21 @@ export default {
         return new Response(object.body, { headers });
       }
 
-      // GET /api/posts — 获取文章列表
+      // ── GET /api/posts ────────────────────────────────────────
       if (method === 'GET' && path === '/api/posts') {
-        const lang     = url.searchParams.get('lang')     || '';
-        const category = url.searchParams.get('category') || '';
-        const slug     = url.searchParams.get('slug')     || '';
-        const page  = parseInt(url.searchParams.get('page')  || '1');
-        const limit = parseInt(url.searchParams.get('limit') || '10');
-        const offset = (page - 1) * limit;
+        const product = url.searchParams.get('category') || url.searchParams.get('product') || '';
+        const slug    = url.searchParams.get('slug')    || '';
+        const page    = parseInt(url.searchParams.get('page')  || '1');
+        const limit   = Math.min(parseInt(url.searchParams.get('limit') || '20'), 100);
+        const offset  = (page - 1) * limit;
 
         let where = 'WHERE published = 1';
         const params = [];
-        if (lang)     { where += ' AND lang = ?';     params.push(lang); }
-        if (category) { where += ' AND category = ?'; params.push(category); }
-        if (slug)     { where += ' AND slug = ?';     params.push(slug); }
+        if (product) { where += ' AND product = ?'; params.push(product); }
+        if (slug)    { where += ' AND slug = ?';    params.push(slug); }
 
         const posts = await env.DB.prepare(
-          `SELECT id, title, slug, excerpt, cover_image, lang, category, tags, views, created_at
-           FROM posts ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`
+          `SELECT ${LIST_COLS} FROM posts ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`
         ).bind(...params, limit, offset).all();
 
         const total = await env.DB.prepare(
@@ -70,125 +72,135 @@ export default {
         return json({ posts: posts.results, total: total.count, page, limit }, 200, origin);
       }
 
-      // GET /api/posts/:id_or_slug — 获取单篇文章（支持数字ID和slug两种方式）
+      // ── GET /api/posts/:slug ──────────────────────────────────
       if (method === 'GET' && path.startsWith('/api/posts/')) {
         const param = decodeURIComponent(path.replace('/api/posts/', ''));
         let post;
         if (/^\d+$/.test(param)) {
-          post = await env.DB.prepare(
-            'SELECT * FROM posts WHERE id = ? AND published = 1'
-          ).bind(parseInt(param)).first();
+          post = await env.DB.prepare('SELECT * FROM posts WHERE id = ? AND published = 1')
+            .bind(parseInt(param)).first();
         } else {
-          post = await env.DB.prepare(
-            'SELECT * FROM posts WHERE slug = ? AND published = 1'
-          ).bind(param).first();
+          post = await env.DB.prepare('SELECT * FROM posts WHERE slug = ? AND published = 1')
+            .bind(param).first();
         }
-
         if (!post) return json({ error: 'Not found' }, 404, origin);
-
-        // 更新浏览量
         await env.DB.prepare('UPDATE posts SET views = views + 1 WHERE id = ?').bind(post.id).run();
-
         return json(post, 200, origin);
       }
 
-      // GET /api/categories — 获取分类列表
+      // ── GET /api/categories ───────────────────────────────────
       if (method === 'GET' && path === '/api/categories') {
         const cats = await env.DB.prepare('SELECT * FROM categories ORDER BY id ASC').all();
         return json(cats.results, 200, origin);
       }
 
-      // ─── 需要鉴权的接口 ──────────────────────────────────────
-
-      if (!isAuthed(request, env)) {
-        // 未授权但不是公开接口
-        if (['POST', 'PUT', 'DELETE'].includes(method)) {
-          return json({ error: 'Unauthorized' }, 401, origin);
-        }
+      // ── Auth guard ────────────────────────────────────────────
+      if (['POST', 'PUT', 'DELETE'].includes(method) && !isAuthed(request, env)) {
+        return json({ error: 'Unauthorized' }, 401, origin);
       }
 
-      // POST /api/posts — 发布新文章
+      // ── POST /api/posts ───────────────────────────────────────
       if (method === 'POST' && path === '/api/posts') {
-        if (!isAuthed(request, env)) return json({ error: 'Unauthorized' }, 401, origin);
-        const body = await request.json();
-        const { title, slug, content, excerpt, cover_image, lang, category, tags, published, status } = body;
-
-        if (!title || !slug || !content) {
-          return json({ error: 'title, slug, content 为必填项' }, 400, origin);
+        const b = await request.json();
+        if (!b.slug || !(b.title_zh || b.title)) {
+          return json({ error: 'slug and title_zh required' }, 400, origin);
         }
+        const isPublished = typeof b.published !== 'undefined'
+          ? (b.published ? 1 : 0)
+          : (b.status === 'published' ? 1 : 0);
 
-        // 兼容 published 布尔值 和 status 字符串两种方式
-        const isPublished = (typeof published !== 'undefined')
-          ? (published ? 1 : 0)
-          : (status === 'published' ? 1 : 0);
-
-        const result = await env.DB.prepare(
-          `INSERT INTO posts (title, slug, content, excerpt, cover_image, lang, category, tags, published)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).bind(
-          title, slug, content,
-          excerpt || '',
-          cover_image || '',
-          lang || 'zh',
-          category || 'general',
-          JSON.stringify(tags || []),
+        const result = await env.DB.prepare(`
+          INSERT INTO posts (
+            slug, product, kind, featured, reading_time,
+            title_zh, title_en, title_ja,
+            excerpt_zh, excerpt_en, excerpt_ja,
+            content_zh, content_en, content_ja,
+            author_name, author_role, author_avatar,
+            tags_zh, keywords, cover_hue, cover_label, published
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        `).bind(
+          b.slug,
+          b.product || 'youtube-premium',
+          b.kind    || 'tutorial',
+          b.featured ? 1 : 0,
+          b.reading_time || 5,
+          b.title_zh || b.title || '',
+          b.title_en || b.title || '',
+          b.title_ja || b.title || '',
+          b.excerpt_zh || b.excerpt || '',
+          b.excerpt_en || b.excerpt || '',
+          b.excerpt_ja || b.excerpt || '',
+          b.content_zh || b.content || '',
+          b.content_en || b.content || '',
+          b.content_ja || b.content || '',
+          b.author_name || b.author || '',
+          b.author_role || '',
+          b.author_avatar || '',
+          JSON.stringify(b.tags_zh || b.tags || []),
+          b.keywords || '',
+          b.cover_hue || 218,
+          b.cover_label || '',
           isPublished
         ).run();
 
         return json({ success: true, id: result.meta.last_row_id }, 201, origin);
       }
 
-      // PUT /api/posts/:id — 更新文章
+      // ── PUT /api/posts/:id ────────────────────────────────────
       if (method === 'PUT' && path.startsWith('/api/posts/')) {
-        if (!isAuthed(request, env)) return json({ error: 'Unauthorized' }, 401, origin);
         const id = path.replace('/api/posts/', '');
-        const body = await request.json();
-        const { title, content, excerpt, cover_image, lang, category, tags, published } = body;
-
-        await env.DB.prepare(
-          `UPDATE posts SET title=?, content=?, excerpt=?, cover_image=?, lang=?, category=?, tags=?, published=?, updated_at=datetime('now')
-           WHERE id=?`
-        ).bind(
-          title, content, excerpt || '', cover_image || '',
-          lang || 'zh', category || 'general',
-          JSON.stringify(tags || []),
-          published ? 1 : 0, id
+        const b = await request.json();
+        await env.DB.prepare(`
+          UPDATE posts SET
+            product=?, kind=?, featured=?, reading_time=?,
+            title_zh=?, title_en=?, title_ja=?,
+            excerpt_zh=?, excerpt_en=?, excerpt_ja=?,
+            content_zh=?, content_en=?, content_ja=?,
+            author_name=?, author_role=?,
+            tags_zh=?, keywords=?, published=?,
+            updated_at=datetime('now')
+          WHERE id=?
+        `).bind(
+          b.product || 'youtube-premium',
+          b.kind    || 'tutorial',
+          b.featured ? 1 : 0,
+          b.reading_time || 5,
+          b.title_zh || '', b.title_en || '', b.title_ja || '',
+          b.excerpt_zh || '', b.excerpt_en || '', b.excerpt_ja || '',
+          b.content_zh || '', b.content_en || '', b.content_ja || '',
+          b.author_name || '', b.author_role || '',
+          JSON.stringify(b.tags_zh || []),
+          b.keywords || '',
+          b.published ? 1 : 0,
+          id
         ).run();
-
         return json({ success: true }, 200, origin);
       }
 
-      // DELETE /api/posts/:id — 删除文章
+      // ── DELETE /api/posts/:id ─────────────────────────────────
       if (method === 'DELETE' && path.startsWith('/api/posts/')) {
-        if (!isAuthed(request, env)) return json({ error: 'Unauthorized' }, 401, origin);
         const id = path.replace('/api/posts/', '');
         await env.DB.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
         return json({ success: true }, 200, origin);
       }
 
-      // POST /api/upload — 上传图片到 R2
+      // ── POST /api/upload ──────────────────────────────────────
       if (method === 'POST' && path === '/api/upload') {
-        if (!isAuthed(request, env)) return json({ error: 'Unauthorized' }, 401, origin);
         const formData = await request.formData();
         const file = formData.get('file');
-        if (!file) return json({ error: '没有文件' }, 400, origin);
-
+        if (!file) return json({ error: 'no file' }, 400, origin);
         const ext = file.name.split('.').pop();
         const key = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
-        await env.IMAGES.put(key, file.stream(), {
-          httpMetadata: { contentType: file.type },
-        });
-
-        // 返回完整 URL（Worker 自身的 /images/:key 路由来服务图片）
-        const host = request.headers.get('Host') || 'fantula-blog-api.jiangdalin1988.workers.dev';
+        await env.IMAGES.put(key, file.stream(), { httpMetadata: { contentType: file.type } });
+        const host = new URL(request.url).hostname;
         return json({ url: `https://${host}/images/${key}` }, 201, origin);
       }
 
-      // GET /api/admin/posts — 管理后台获取所有文章（含未发布）
+      // ── GET /api/admin/posts ──────────────────────────────────
       if (method === 'GET' && path === '/api/admin/posts') {
         if (!isAuthed(request, env)) return json({ error: 'Unauthorized' }, 401, origin);
         const posts = await env.DB.prepare(
-          'SELECT id, title, slug, lang, category, published, views, created_at FROM posts ORDER BY created_at DESC'
+          `SELECT ${LIST_COLS}, published FROM posts ORDER BY created_at DESC`
         ).all();
         return json(posts.results, 200, origin);
       }

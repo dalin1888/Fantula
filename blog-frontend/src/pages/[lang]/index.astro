@@ -1,0 +1,109 @@
+---
+import Layout from '../../components/Layout.astro';
+import Masthead from '../../components/Masthead.astro';
+import Colophon from '../../components/Colophon.astro';
+import StoryCard from '../../components/StoryCard.astro';
+import { LANGS, PRODUCTS, I18N, dateFmt } from '../../lib/products.js';
+import { getPosts, t } from '../../lib/api.js';
+
+export async function getStaticPaths() {
+  const paths = [];
+  for (const lang of LANGS) {
+    let posts = [];
+    try { posts = await getPosts({ limit: 50 }); } catch (e) { posts = []; }
+    paths.push({ params: { lang }, props: { lang, posts } });
+  }
+  return paths;
+}
+
+const { lang, posts } = Astro.props;
+const ui = I18N[lang] || I18N.zh;
+
+const headline = posts.find(p => p.slug === 'or-ccseh-05-fix-2026') || posts[0];
+const featured = posts.filter(p => p.featured && p.slug !== headline?.slug).slice(0, 2);
+const rest     = posts.filter(p => !p.featured);
+
+const headlineProduct = PRODUCTS.find(p => p.slug === headline?.product);
+---
+<Layout
+  title={`Fantula Journal · 流媒体代充博客`}
+  description="Fantula 编辑部博客。聚焦 YouTube Premium、Spotify Premium、YouTube 频道会员的跨区注册、家庭组拼车、报错排查与代充经验。"
+  lang={lang}
+>
+  <Masthead lang={lang} />
+
+  {headline && (
+    <section class="headline">
+      <div class="container">
+        <div class="headline__date">{dateFmt(headline.created_at || '2026-04-22', lang)}</div>
+        <div class="headline__category">{headlineProduct?.name[lang]?.toUpperCase()} · 本期头条</div>
+        <h2 class="headline__title" set:html={t(headline, 'title', lang).replace('OR-CCSEH-05', '<em>OR-CCSEH-05</em>')}></h2>
+        <div class="headline__ornament"><span></span><em>Field Notes</em><span></span></div>
+        <p class="headline__lede">{t(headline, 'excerpt', lang)}</p>
+        <div class="headline__byline">
+          <span>By <strong>{headline.author_name}</strong></span>
+          <span class="dot"></span>
+          <span>{headline.author_role}</span>
+          <span class="dot"></span>
+          <span>{headline.reading_time} {lang === 'ja' ? '分で読了' : lang === 'en' ? 'min read' : '分钟阅读'}</span>
+        </div>
+        <div class="headline__cta">
+          <a href={`/${lang}/article/${headline.slug}/`}>{ui.readMore} →</a>
+        </div>
+      </div>
+    </section>
+  )}
+
+  <section class="container">
+    <div class="section-head">
+      <div class="section-head__kicker">Three Product Lines</div>
+      <h3 class="section-head__title">{ui.sectionLines}</h3>
+      <div class="section-head__rule"></div>
+    </div>
+    <div class="lines">
+      {PRODUCTS.map((p, i) => {
+        const count = posts.filter(a => a.product === p.slug).length;
+        return (
+          <>
+            <a class="line" href={`/${lang}/${p.slug}/`}>
+              <div class="line__num">№ {p.kicker}</div>
+              <h4 class="line__name">{p.name[lang]}</h4>
+              <p class="line__tag">{p.tagline[lang]}</p>
+              <div class="line__count">{count} {ui.articles}</div>
+              <span class="line__cta">{lang === 'ja' ? 'アーカイブへ' : lang === 'en' ? 'Browse archive' : '进入档案'}</span>
+            </a>
+            {i < PRODUCTS.length - 1 && <div class="lines__divider"></div>}
+          </>
+        );
+      })}
+    </div>
+  </section>
+
+  {featured.length > 0 && (
+    <section class="container">
+      <div class="section-head">
+        <div class="section-head__kicker">Editor's Picks</div>
+        <h3 class="section-head__title">{ui.sectionFeatured}</h3>
+        <div class="section-head__rule"></div>
+      </div>
+      <div class="article-list article-list--two">
+        {featured.map(p => <StoryCard post={p} lang={lang} />)}
+      </div>
+    </section>
+  )}
+
+  {rest.length > 0 && (
+    <section class="container">
+      <div class="section-head">
+        <div class="section-head__kicker">Archive</div>
+        <h3 class="section-head__title">{ui.sectionLatest}</h3>
+        <div class="section-head__rule"></div>
+      </div>
+      <div class="article-list">
+        {rest.map(p => <StoryCard post={p} lang={lang} />)}
+      </div>
+    </section>
+  )}
+
+  <Colophon lang={lang} />
+</Layout>

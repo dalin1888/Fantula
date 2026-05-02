@@ -1,0 +1,89 @@
+---
+import Layout from '../../components/Layout.astro';
+import Masthead from '../../components/Masthead.astro';
+import Colophon from '../../components/Colophon.astro';
+import StoryCard from '../../components/StoryCard.astro';
+import { LANGS, PRODUCTS, I18N, KIND_LABEL } from '../../lib/products.js';
+import { getPosts } from '../../lib/api.js';
+
+export async function getStaticPaths() {
+  const paths = [];
+  for (const lang of LANGS) {
+    let allPosts = [];
+    try { allPosts = await getPosts({ limit: 100 }); } catch (e) { allPosts = []; }
+    for (const product of PRODUCTS) {
+      const posts = allPosts.filter(p => p.product === product.slug);
+      paths.push({ params: { lang, product: product.slug }, props: { lang, product, posts } });
+    }
+  }
+  return paths;
+}
+
+const { lang, product, posts } = Astro.props;
+const ui = I18N[lang] || I18N.zh;
+const lastDate = posts.reduce((m, p) => {
+  const d = p.created_at || p.date || '';
+  return d > m ? d : m;
+}, '');
+const kinds = ['all', ...new Set(posts.map(p => p.kind))];
+---
+<Layout
+  title={`${product.name[lang]} · ${product.tagline[lang]} | Fantula Journal`}
+  description={`${product.name[lang]} 完整档案。${product.tagline[lang]}。`}
+  lang={lang}
+  product={product.slug}
+>
+  <Masthead lang={lang} product={product.slug} />
+
+  <div class="container">
+    <nav class="breadcrumb">
+      <a href={`/${lang}/`}>{ui.crumbHome}</a>
+      <span class="sep">/</span>
+      <span class="current">{product.name[lang]}</span>
+    </nav>
+  </div>
+
+  <section class="cat-masthead">
+    <div class="container">
+      <div class="cat-masthead__num">№ {product.kicker} · 产品线档案</div>
+      <h1 class="cat-masthead__title">{product.name[lang]}</h1>
+      <p class="cat-masthead__tag">{product.tagline[lang]}</p>
+      <div class="cat-masthead__counts">
+        <span><strong>{posts.length}</strong> {ui.articles}</span>
+        <span>·</span>
+        <span><strong>{kinds.length - 1}</strong> {ui.sections}</span>
+        {lastDate && <><span>·</span><span>{ui.updated} <strong>{lastDate.slice(0, 10)}</strong></span></>}
+      </div>
+    </div>
+  </section>
+
+  <div class="container">
+    <div class="filter-row">
+      {kinds.map(k => (
+        <a href="#" class={k === 'all' ? 'is-active' : ''}
+           data-kind={k}>{KIND_LABEL[k] || k}</a>
+      ))}
+    </div>
+    <div class="article-list" style="padding-top:48px" id="post-list">
+      {posts.map(p => <StoryCard post={p} lang={lang} />)}
+    </div>
+  </div>
+
+  <Colophon lang={lang} />
+</Layout>
+
+<script>
+// Client-side filter (no re-fetch needed, posts already in DOM)
+const buttons = document.querySelectorAll('.filter-row a');
+buttons.forEach(btn => {
+  btn.addEventListener('click', e => {
+    e.preventDefault();
+    const kind = btn.dataset.kind;
+    buttons.forEach(b => b.classList.toggle('is-active', b === btn));
+    document.querySelectorAll('#post-list .story').forEach(card => {
+      const match = kind === 'all' || card.dataset.kind === kind;
+      card.style.display = match ? '' : 'none';
+    });
+  });
+});
+</script>

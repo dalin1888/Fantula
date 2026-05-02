@@ -1,0 +1,45 @@
+---
+const { lang } = Astro.props;
+import { PRODUCTS, I18N } from '../lib/products.js';
+const t = I18N[lang] || I18N.zh;
+---
+<footer class="colophon">
+  <div class="container">
+    <h2 class="colophon__title">Fantula <em>Journal</em></h2>
+    <div class="colophon__sub">— Colophon —</div>
+    <div class="colophon__grid">
+      <div>
+        <h4>{t.footerAbout}</h4>
+        <p class="colophon__about">{t.footerBlurb}</p>
+      </div>
+      <div>
+        <h4>{t.footerProduct}</h4>
+        <ul>
+          {PRODUCTS.map(p => (
+            <li><a href={`/${lang}/${p.slug}/`}>{p.name[lang]}</a></li>
+          ))}
+        </ul>
+      </div>
+      <div>
+        <h4>{t.footerAbout}</h4>
+        <ul>
+          <li><a href="https://www.fantula.com/pc/company">公司简介</a></li>
+          <li><a href="https://www.fantula.com/pc/about-us">我们的使命</a></li>
+          <li><a href="https://www.fantula.com/pc/advantages">我们的优势</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>{t.footerLegal}</h4>
+        <ul>
+          <li><a href="https://www.fantula.com/pc/privacy">隐私政策</a></li>
+          <li><a href="https://www.fantula.com/pc/policy">用户协议</a></li>
+          <li><a href="https://www.fantula.com/pc/refund">退款政策</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="colophon__bottom">
+      <span>© 2019–2026 Fantula</span>
+      <span>www.fantula.com</span>
+    </div>
+  </div>
+</footer>
